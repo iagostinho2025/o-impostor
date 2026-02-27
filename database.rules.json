@@ -77,7 +77,7 @@
     },
     "rooms": {
       "$roomCode": {
-        ".read": "auth != null && (data.child('players').child(auth.uid).exists() || data.child('status').val() === 'lobby')",
+        ".read": "auth != null && (!data.exists() || data.child('players').child(auth.uid).exists() || data.child('status').val() === 'lobby')",
         ".write": "auth != null && ((!data.exists() && newData.exists() && newData.child('hostId').val() === auth.uid) || (data.exists() && !newData.exists() && data.child('hostId').val() === auth.uid))",
         "hostId": {
           ".write": "auth != null && (data.parent().child('hostId').val() === auth.uid || (!data.parent().child('players').child(data.parent().child('hostId').val()).exists() && data.parent().child('players').child(auth.uid).exists()))"
