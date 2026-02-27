@@ -104,7 +104,7 @@
         "players": {
           "$uid": {
             ".read": "auth != null && data.parent().child(auth.uid).exists()",
-            ".write": "auth != null && ((data.parent().parent().child('hostId').val() === auth.uid) || (newData.parent().parent().child('hostId').val() === auth.uid) || (auth.uid === $uid && (newData.parent().parent().child('status').val() === 'lobby' || data.parent().parent().child('status').val() === 'lobby' || (data.parent().parent().child('status').val() === 'revealing' && data.child('confirmed').val() === false && newData.child('confirmed').val() === true && newData.child('vote').val() === data.child('vote').val()) || (data.parent().parent().child('status').val() === 'voting' && data.child('vote').val() === '' && newData.child('confirmed').val() === data.child('confirmed').val()))))",
+            ".write": "auth != null && ((auth.uid === $uid && (data.exists() || root.child('rooms/' + $roomCode + '/status').val() === 'lobby')) || root.child('rooms/' + $roomCode + '/hostId').val() === auth.uid)",
             "id": {
               ".validate": "newData.isString() && newData.val() === $uid"
             },
