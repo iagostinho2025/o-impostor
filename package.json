@@ -1,0 +1,9 @@
+﻿{
+  "name": "o-impostor-static",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npx serve . -l 3000",
+    "start": "npx serve . -l 3000"
+  }
+}
