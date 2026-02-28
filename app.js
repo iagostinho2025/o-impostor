@@ -221,6 +221,27 @@ function getTypingCompletedRounds(roomData = state.roomData) {
   return Math.max(0, Math.min(typedRound - 1, roundCount));
 }
 
+function hasDuplicateTypedResponse(candidateRaw, roomData = state.roomData, selfUid = state.uid) {
+  const candidate = sanitizeTypedResponse(candidateRaw);
+  if (candidate.length < 2) return false;
+
+  const currentResponses = getTypedResponses(roomData);
+  const duplicateInCurrent = Object.entries(currentResponses).some(([uid, value]) => {
+    if (uid === selfUid) return false;
+    return sanitizeTypedResponse(value || "") === candidate;
+  });
+  if (duplicateInCurrent) return true;
+
+  const history = getTypedResponsesHistory(roomData);
+  return Object.values(history).some((roundMap) => {
+    if (!roundMap || typeof roundMap !== "object") return false;
+    return Object.entries(roundMap).some(([uid, value]) => {
+      if (uid === selfUid) return false;
+      return sanitizeTypedResponse(value || "") === candidate;
+    });
+  });
+}
+
 function setError(message) {
   state.error = message || "";
   render();
@@ -1228,8 +1249,16 @@ async function submitTypedResponse() {
   if (!state.roomCode || !state.uid) throw new Error("Sala não encontrada.");
   if (state.roomData?.status !== "typing") throw new Error("O modo de digitação não está ativo.");
 
+  const alreadySubmitted = sanitizeTypedResponse(getTypedResponses()?.[state.uid] || "").length >= 2;
+  if (alreadySubmitted) {
+    throw new Error("Você já confirmou sua palavra nesta rodada.");
+  }
+
   const draft = sanitizeTypedResponse(getMyTypedDraft());
   if (draft.length < 2) throw new Error("Digite pelo menos 2 caracteres.");
+  if (hasDuplicateTypedResponse(draft)) {
+    throw new Error("Essa palavra já foi digitada por outro jogador. Escolha outra.");
+  }
 
   await set(ref(db, `rooms/${state.roomCode}/typedResponses/${state.uid}`), draft);
   state.typingDraft = draft;
@@ -1970,6 +1999,7 @@ function renderTyping(phaseFx = false) {
   const typingCompleted = !!state.roomData?.typingCompleted;
   const completedRounds = getTypingCompletedRounds();
   const pendingPlayers = getTypingPendingPlayers();
+  const alreadySubmitted = sanitizeTypedResponse(responses[state.uid] || "").length >= 2;
   const submittedCount = players.filter((p) => sanitizeTypedResponse(responses[p.id] || "").length >= 2).length;
   const myDraft = getMyTypedDraft();
   const keyboardRows = [
@@ -2007,16 +2037,16 @@ function renderTyping(phaseFx = false) {
           <div class="typing-keyboard">
             ${keyboardRows.map((row) => `
               <div class="typing-key-row">
-                ${row.map((key) => `<button class="typing-key" data-action="typing-key" data-key="${key}">${key}</button>`).join("")}
+                ${row.map((key) => `<button class="typing-key" data-action="typing-key" data-key="${key}" ${typingCompleted || alreadySubmitted ? "disabled" : ""}>${key}</button>`).join("")}
               </div>
             `).join("")}
             <div class="typing-key-row typing-key-row-wide">
-              <button class="typing-key typing-key-alt" data-action="typing-backspace">Apagar</button>
-              <button class="typing-key typing-key-alt" data-action="typing-clear">Limpar</button>
+              <button class="typing-key typing-key-alt" data-action="typing-backspace" ${typingCompleted || alreadySubmitted ? "disabled" : ""}>Apagar</button>
+              <button class="typing-key typing-key-alt" data-action="typing-clear" ${typingCompleted || alreadySubmitted ? "disabled" : ""}>Limpar</button>
             </div>
           </div>
 
-          <button class="btn btn-primary" data-action="submit-typed-response" ${typingCompleted ? "disabled" : ""}>${typingCompleted ? "Rodadas concluídas" : (sanitizeTypedResponse(responses[state.uid] || "").length >= 2 ? "Atualizar resposta" : "Confirmar resposta")}</button>
+          <button class="btn btn-primary" data-action="submit-typed-response" ${typingCompleted || alreadySubmitted ? "disabled" : ""}>${typingCompleted ? "Rodadas concluídas" : (alreadySubmitted ? "Resposta confirmada" : "Confirmar resposta")}</button>
         </div>
 
         <div class="card">

@@ -125,15 +125,15 @@
         "typedResponses": {
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
           "$uid": {
-            ".write": "auth != null && auth.uid === $uid && root.child('rooms/' + $roomCode + '/players').child(auth.uid).exists()",
-            ".validate": "newData.isString() && newData.val().length >= 1 && newData.val().length <= 18"
+            ".write": "auth != null && auth.uid === $uid && root.child('rooms/' + $roomCode + '/players').child(auth.uid).exists() && root.child('rooms/' + $roomCode + '/status').val() === 'typing' && !data.exists()",
+            ".validate": "newData.isString() && newData.val().length >= 2 && newData.val().length <= 18"
           }
         },
         "typedResponsesHistory": {
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
           "$round": {
             "$uid": {
-              ".validate": "newData.isString() && newData.val().length >= 1 && newData.val().length <= 18"
+              ".validate": "newData.isString() && newData.val().length >= 2 && newData.val().length <= 18"
             }
           }
         },

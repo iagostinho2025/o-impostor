@@ -253,6 +253,38 @@ p { font-size: 0.94rem; line-height: 1.6; color: var(--text-muted); }
 
 .avatar-option:disabled, .color-option:disabled { opacity: 0.45; cursor: not-allowed; }
 
+.color-option:disabled {
+  opacity: 1;
+  filter: saturate(0.75) brightness(0.88);
+  position: relative;
+  overflow: hidden;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.color-option:disabled::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(
+      135deg,
+      rgba(0, 0, 0, 0.22) 0 5px,
+      rgba(255, 255, 255, 0.08) 5px 10px
+    );
+}
+
+.color-option:disabled::before {
+  content: "🔒";
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  font-size: 0.7rem;
+  line-height: 1;
+  opacity: 0.85;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  z-index: 1;
+}
+
 .input-group label {
   font-size: 0.78rem;
   font-weight: 700;
