@@ -5,6 +5,7 @@ import {
   ref,
   onValue,
   get,
+  set,
   update,
   remove,
   runTransaction,
@@ -52,7 +53,9 @@ const state = {
   recordedRounds: {},
   friendCodeInput: "",
   connectedUnsub: null,
-  showRoomSettings: false
+  showRoomSettings: false,
+  typingDraft: "",
+  typingDraftDirty: false
 };
 
 const firebaseApp = initializeApp(firebaseConfig);
@@ -175,6 +178,24 @@ function getRoomSettings(roomData = state.roomData) {
     level3HintEnabled: roomData?.level3HintEnabled !== false,
     impostorCount: Math.max(1, Math.min(configured, maxImpostors))
   };
+}
+
+function sanitizeTypedResponse(text = "") {
+  return String(text)
+    .toUpperCase()
+    .replace(/[^A-Z0-9À-ÚÇ ]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 18);
+}
+
+function getTypedResponses(roomData = state.roomData) {
+  return roomData?.typedResponses || {};
+}
+
+function getMyTypedDraft(roomData = state.roomData) {
+  const saved = sanitizeTypedResponse(getTypedResponses(roomData)?.[state.uid] || "");
+  return state.typingDraftDirty ? state.typingDraft : saved;
 }
 
 function setError(message) {
@@ -590,7 +611,12 @@ async function subscribeToRoom(code) {
       return;
     }
 
+    const previousStatus = state.roomData?.status || "";
     state.roomData = data;
+    if (data.status !== previousStatus && data.status === "typing") {
+      state.typingDraft = "";
+      state.typingDraftDirty = false;
+    }
     maybeRunCountdown();
     await maybeAutoAdvancePhase();
     await maybeRecoverHost();
@@ -627,6 +653,8 @@ async function leaveLocalRoom() {
   saveRoomSession("");
   state.roomData = null;
   state.showRoomSettings = false;
+  state.typingDraft = "";
+  state.typingDraftDirty = false;
   state.homeTab = "home";
   state.loading = false;
   if (state.uid) {
@@ -725,6 +753,7 @@ async function createRoom(nickname) {
       impostorIds: [],
       level3HintEnabled: true,
       impostorCount: 1,
+      typedResponses: {},
       speakingOrder: [],
       players: {
         [state.uid]: {
@@ -961,6 +990,7 @@ async function startGame() {
   updates[`rooms/${state.roomCode}/word`] = word;
   updates[`rooms/${state.roomCode}/impostorId`] = impostorId;
   updates[`rooms/${state.roomCode}/impostorIds`] = impostorIds;
+  updates[`rooms/${state.roomCode}/typedResponses`] = null;
   updates[`rooms/${state.roomCode}/speakingOrder`] = speakingOrder;
   updates[`rooms/${state.roomCode}/countdownEndsAt`] = Date.now() + 5000;
 
@@ -988,6 +1018,28 @@ async function goToVoting() {
 
   updates[`rooms/${state.roomCode}/status`] = "voting";
   await update(ref(db), updates);
+}
+
+async function goToTyping() {
+  if (!isHost()) throw new Error("Somente o anfitrião pode iniciar este modo.");
+  if (state.roomData?.status !== "playing") throw new Error("Esse modo só está disponível na fase de dicas.");
+
+  await update(ref(db, `rooms/${state.roomCode}`), {
+    status: "typing",
+    typedResponses: null
+  });
+}
+
+async function submitTypedResponse() {
+  if (!state.roomCode || !state.uid) throw new Error("Sala não encontrada.");
+  if (state.roomData?.status !== "typing") throw new Error("O modo de digitação não está ativo.");
+
+  const draft = sanitizeTypedResponse(getMyTypedDraft());
+  if (draft.length < 2) throw new Error("Digite pelo menos 2 caracteres.");
+
+  await set(ref(db, `rooms/${state.roomCode}/typedResponses/${state.uid}`), draft);
+  state.typingDraft = draft;
+  state.typingDraftDirty = false;
 }
 
 async function vote(targetId) {
@@ -1020,6 +1072,7 @@ async function playAgain() {
   updates[`rooms/${state.roomCode}/word`] = "";
   updates[`rooms/${state.roomCode}/impostorId`] = "";
   updates[`rooms/${state.roomCode}/impostorIds`] = [];
+  updates[`rooms/${state.roomCode}/typedResponses`] = null;
   updates[`rooms/${state.roomCode}/speakingOrder`] = [];
   updates[`rooms/${state.roomCode}/countdownEndsAt`] = 0;
 
@@ -1059,6 +1112,8 @@ async function leaveRoom() {
 }
 function renderVoting(phaseFx = false) {
   const players = getPlayers();
+  const responses = getTypedResponses();
+  const hasTypedResponses = players.some((p) => sanitizeTypedResponse(responses[p.id] || "").length >= 2);
   const mine = myPlayer();
   const myVote = mine?.vote || "";
   const votedCount = players.filter((p) => !!p.vote).length;
@@ -1076,6 +1131,27 @@ function renderVoting(phaseFx = false) {
           </div>
           <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${progress}%;"></div></div>
         </div>
+
+        ${hasTypedResponses ? `
+          <div class="card card-sm">
+            <div class="section-title" style="margin-bottom:10px;">Respostas Digitadas</div>
+            <div class="typing-response-grid">
+              ${players.map((p) => {
+                const response = sanitizeTypedResponse(responses[p.id] || "");
+                const ready = response.length >= 2;
+                return `
+                  <div class="typing-response-item ${ready ? "ready" : ""}">
+                    <div class="typing-response-head">
+                      <div class="player-avatar" style="width:28px;height:28px;font-size:0.78rem;background:${escapeHtml(getPlayerColor(p))};">${escapeHtml(getPlayerAvatar(p))}</div>
+                      <strong>${escapeHtml(p.nickname || "Sem nome")}</strong>
+                    </div>
+                    <div class="typing-response-text">${ready ? escapeHtml(response) : "Sem resposta"}</div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+        ` : ""}
 
         <div class="card">
           <div class="section-title" style="margin-bottom:12px;">Selecione o suspeito</div>
@@ -1218,6 +1294,7 @@ function render() {
   if (status === "countdown") appEl.innerHTML = renderCountdown(phaseFx);
   if (status === "revealing") appEl.innerHTML = renderRevealing(phaseFx);
   if (status === "playing") appEl.innerHTML = renderPlaying(phaseFx);
+  if (status === "typing") appEl.innerHTML = renderTyping(phaseFx);
   if (status === "voting") appEl.innerHTML = renderVoting(phaseFx);
   if (status === "results") appEl.innerHTML = renderResults(false, phaseFx);
   if (status === "reveal") appEl.innerHTML = renderResults(true, phaseFx);
@@ -1656,6 +1733,79 @@ function renderRevealing(phaseFx = false) {
   `;
 }
 
+function renderTyping(phaseFx = false) {
+  const players = getPlayers();
+  const responses = getTypedResponses();
+  const submittedCount = players.filter((p) => sanitizeTypedResponse(responses[p.id] || "").length >= 2).length;
+  const myDraft = getMyTypedDraft();
+  const keyboardRows = [
+    ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+    ["A", "S", "D", "F", "G", "H", "J", "K", "L"],
+    ["Z", "X", "C", "V", "B", "N", "M"]
+  ];
+
+  return `
+    <section class="screen${phaseFx ? " phase-enter" : ""}" data-phase="typing">
+      <div class="screen-inner">
+        <div class="card typing-hero">
+          <div class="section-title" style="margin-bottom:8px;">Modo Digitar Respostas</div>
+          <h2 style="margin-bottom:8px;">Teclado em tempo real</h2>
+          <p>Todos veem as respostas conforme cada jogador confirma sua dica.</p>
+        </div>
+
+        <div class="card typing-console">
+          <div class="typing-display-wrap">
+            <div class="section-title">Sua resposta</div>
+            <div class="typing-display">${escapeHtml(myDraft || "TOQUE NAS TECLAS")}</div>
+            <div class="typing-meta">${myDraft.length}/18 caracteres</div>
+          </div>
+
+          <div class="typing-keyboard">
+            ${keyboardRows.map((row) => `
+              <div class="typing-key-row">
+                ${row.map((key) => `<button class="typing-key" data-action="typing-key" data-key="${key}">${key}</button>`).join("")}
+              </div>
+            `).join("")}
+            <div class="typing-key-row typing-key-row-wide">
+              <button class="typing-key typing-key-alt" data-action="typing-backspace">Apagar</button>
+              <button class="typing-key typing-key-alt" data-action="typing-clear">Limpar</button>
+            </div>
+          </div>
+
+          <button class="btn btn-primary" data-action="submit-typed-response">${sanitizeTypedResponse(responses[state.uid] || "").length >= 2 ? "Atualizar resposta" : "Confirmar resposta"}</button>
+        </div>
+
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px;">
+            <div class="section-title">Respostas digitadas</div>
+            <div style="font-size:0.82rem;color:var(--text-muted);">${submittedCount}/${players.length} enviadas</div>
+          </div>
+          <div class="typing-response-grid">
+            ${players.map((p) => {
+              const response = sanitizeTypedResponse(responses[p.id] || "");
+              const ready = response.length >= 2;
+              return `
+                <div class="typing-response-item ${ready ? "ready" : ""}">
+                  <div class="typing-response-head">
+                    <div class="player-avatar" style="width:30px;height:30px;font-size:0.82rem;background:${escapeHtml(getPlayerColor(p))};">${escapeHtml(getPlayerAvatar(p))}</div>
+                    <strong>${escapeHtml(p.nickname || "Sem nome")}${p.id === state.uid ? " (você)" : ""}</strong>
+                  </div>
+                  <div class="typing-response-text">${ready ? escapeHtml(response) : "Aguardando..."}</div>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        </div>
+
+        ${isHost()
+          ? '<button class="btn btn-danger" data-action="go-voting">Ir para Votação</button>'
+          : '<div class="card card-sm text-center"><p>Aguardando o anfitrião iniciar a votação.</p></div>'}
+        ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
+      </div>
+    </section>
+  `;
+}
+
 function renderPlaying(phaseFx = false) {
   const players = getPlayers();
   const order = state.roomData.speakingOrder || [];
@@ -1689,9 +1839,12 @@ function renderPlaying(phaseFx = false) {
         </div>
 
         ${isHost() ? `
-          <button class="btn btn-danger" data-action="go-voting">Ir para Votação</button>
+          <div style="display:flex;flex-direction:column;gap:10px;">
+            <button class="btn btn-primary" data-action="go-typing">Digitar Respostas</button>
+            <button class="btn btn-danger" data-action="go-voting">Ir para Votação</button>
+          </div>
         ` : `
-          <div class="card card-sm text-center"><p>Aguardando o anfitrião iniciar a votação.</p></div>
+          <div class="card card-sm text-center"><p>O anfitrião pode seguir para votação ou abrir o modo Digitar Respostas.</p></div>
         `}
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
       </div>
@@ -1963,6 +2116,53 @@ function bindGameActions() {
       state.error = "";
     } catch (error) {
       setError(error.message || "Não foi possível iniciar votação.");
+    }
+  });
+
+  document.querySelector("[data-action='go-typing']")?.addEventListener("click", async () => {
+    try {
+      await goToTyping();
+      state.error = "";
+    } catch (error) {
+      setError(error.message || "Não foi possível iniciar modo de digitação.");
+    }
+  });
+
+  document.querySelectorAll("[data-action='typing-key']").forEach((el) => {
+    el.addEventListener("click", () => {
+      const key = sanitizeTypedResponse(el.getAttribute("data-key") || "");
+      if (!key) return;
+      const next = sanitizeTypedResponse(`${getMyTypedDraft()}${key}`);
+      state.typingDraft = next;
+      state.typingDraftDirty = true;
+      clearError();
+      render();
+    });
+  });
+
+  document.querySelector("[data-action='typing-backspace']")?.addEventListener("click", () => {
+    const current = getMyTypedDraft();
+    const next = sanitizeTypedResponse(current.slice(0, -1));
+    state.typingDraft = next;
+    state.typingDraftDirty = true;
+    clearError();
+    render();
+  });
+
+  document.querySelector("[data-action='typing-clear']")?.addEventListener("click", () => {
+    state.typingDraft = "";
+    state.typingDraftDirty = true;
+    clearError();
+    render();
+  });
+
+  document.querySelector("[data-action='submit-typed-response']")?.addEventListener("click", async () => {
+    try {
+      await submitTypedResponse();
+      state.error = "";
+      render();
+    } catch (error) {
+      setError(error.message || "Não foi possível enviar resposta.");
     }
   });
 

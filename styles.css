@@ -126,6 +126,13 @@ html, body {
     linear-gradient(160deg, #08121b 0%, #04080f 100%);
 }
 
+.screen[data-phase="typing"] {
+  background:
+    radial-gradient(circle at 18% 16%, rgba(0, 209, 255, 0.2), transparent 36%),
+    radial-gradient(circle at 82% 82%, rgba(255, 209, 102, 0.16), transparent 34%),
+    linear-gradient(160deg, #07101a 0%, #04080f 100%);
+}
+
 .screen-inner {
   width: 100%;
   max-width: 460px;
@@ -849,6 +856,142 @@ button.hub-game-card:hover {
 
 .waiting-dots::after { content: ""; animation: dots 1.5s steps(4, end) infinite; }
 
+.typing-hero {
+  border-color: rgba(0, 209, 255, 0.4);
+  background: linear-gradient(145deg, rgba(0, 209, 255, 0.12), rgba(255, 209, 102, 0.08));
+}
+
+.typing-console {
+  border-color: rgba(0, 209, 255, 0.34);
+  box-shadow: 0 16px 34px rgba(0, 209, 255, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.typing-display-wrap {
+  border: 1px solid rgba(0, 209, 255, 0.28);
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(0, 209, 255, 0.08);
+  margin-bottom: 12px;
+}
+
+.typing-display {
+  margin-top: 8px;
+  min-height: 54px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(4, 9, 15, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: clamp(1.1rem, 4.5vw, 1.4rem);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--primary);
+  padding: 8px;
+}
+
+.typing-meta {
+  margin-top: 8px;
+  text-align: right;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.typing-keyboard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.typing-key-row {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.typing-key-row:nth-child(2) {
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+}
+
+.typing-key-row:nth-child(3) {
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.typing-key-row-wide {
+  grid-template-columns: 1fr 1fr;
+}
+
+.typing-key {
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+  color: var(--text);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: transform var(--transition), border-color var(--transition), box-shadow var(--transition);
+}
+
+.typing-key:hover {
+  transform: translateY(-1px);
+  border-color: rgba(0, 209, 255, 0.52);
+  box-shadow: 0 8px 16px rgba(0, 209, 255, 0.14);
+}
+
+.typing-key:active {
+  transform: translateY(0);
+}
+
+.typing-key-alt {
+  letter-spacing: 0.01em;
+  font-size: 0.82rem;
+}
+
+.typing-response-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.typing-response-item {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.typing-response-item.ready {
+  border-color: rgba(22, 199, 132, 0.45);
+  background: rgba(22, 199, 132, 0.1);
+}
+
+.typing-response-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+
+.typing-response-text {
+  min-height: 40px;
+  border-radius: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  background: rgba(3, 8, 13, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  text-align: center;
+  font-size: 0.88rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #f4fbff;
+}
+
 @keyframes dots {
   0% { content: ""; }
   25% { content: "."; }
@@ -934,6 +1077,8 @@ button.hub-game-card:hover {
   .hub-header h2 { font-size: 1.35rem; }
   .hub-user-pill { font-size: 0.67rem; }
   .hub-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .typing-response-grid { grid-template-columns: 1fr; }
+  .typing-key { height: 38px; }
 }
 
 @media (min-width: 920px) {

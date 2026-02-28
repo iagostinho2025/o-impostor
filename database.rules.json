@@ -83,7 +83,7 @@
           ".write": "auth != null && (data.parent().child('hostId').val() === auth.uid || (!data.parent().child('players').child(data.parent().child('hostId').val()).exists() && data.parent().child('players').child(auth.uid).exists()))"
         },
         "status": {
-          ".validate": "newData.isString() && (newData.val() === 'lobby' || newData.val() === 'countdown' || newData.val() === 'revealing' || newData.val() === 'playing' || newData.val() === 'voting' || newData.val() === 'results' || newData.val() === 'reveal')",
+          ".validate": "newData.isString() && (newData.val() === 'lobby' || newData.val() === 'countdown' || newData.val() === 'revealing' || newData.val() === 'playing' || newData.val() === 'typing' || newData.val() === 'voting' || newData.val() === 'results' || newData.val() === 'reveal')",
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid"
         },
         "word": {
@@ -105,6 +105,13 @@
         "impostorCount": {
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
           ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 3"
+        },
+        "typedResponses": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid && root.child('rooms/' + $roomCode + '/players').child(auth.uid).exists()",
+            ".validate": "newData.isString() && newData.val().length >= 1 && newData.val().length <= 18"
+          }
         },
         "speakingOrder": {
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid"
