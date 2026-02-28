@@ -51,7 +51,8 @@ const state = {
   recordingStats: false,
   recordedRounds: {},
   friendCodeInput: "",
-  connectedUnsub: null
+  connectedUnsub: null,
+  showRoomSettings: false
 };
 
 const firebaseApp = initializeApp(firebaseConfig);
@@ -155,6 +156,27 @@ function myPlayer() {
   return state.roomData?.players?.[state.uid] || null;
 }
 
+function getImpostorIds(roomData = state.roomData) {
+  const fromArray = Array.isArray(roomData?.impostorIds) ? roomData.impostorIds.filter(Boolean) : [];
+  if (fromArray.length > 0) return fromArray;
+  const legacy = roomData?.impostorId || "";
+  return legacy ? [legacy] : [];
+}
+
+function getMaxImpostorCount(playersCount) {
+  return Math.max(1, Math.min(3, playersCount - 1));
+}
+
+function getRoomSettings(roomData = state.roomData) {
+  const playersCount = Object.keys(roomData?.players || {}).length;
+  const maxImpostors = getMaxImpostorCount(playersCount || 3);
+  const configured = Number(roomData?.impostorCount) || 1;
+  return {
+    level3HintEnabled: roomData?.level3HintEnabled !== false,
+    impostorCount: Math.max(1, Math.min(configured, maxImpostors))
+  };
+}
+
 function setError(message) {
   state.error = message || "";
   render();
@@ -248,8 +270,8 @@ function subscribeMyStats() {
 
 function getRoundResult(roomData = state.roomData) {
   const players = Object.values(roomData?.players || {});
-  const impostorId = roomData?.impostorId || "";
-  if (!impostorId || players.length === 0) return null;
+  const impostorIds = getImpostorIds(roomData);
+  if (impostorIds.length === 0 || players.length === 0) return null;
 
   const votes = {};
   players.forEach((p) => { votes[p.id] = 0; });
@@ -260,9 +282,9 @@ function getRoundResult(roomData = state.roomData) {
   const maxVotes = Math.max(...Object.values(votes), 0);
   const mostVoted = players.filter((p) => votes[p.id] === maxVotes && maxVotes > 0);
   const isTie = mostVoted.length > 1;
-  const impostorEliminated = !isTie && mostVoted.length === 1 && mostVoted[0].id === impostorId;
-  const meIsImpostor = state.uid === impostorId;
-  const won = meIsImpostor ? !impostorEliminated : impostorEliminated;
+  const impostorHit = !isTie && mostVoted.length === 1 && impostorIds.includes(mostVoted[0].id);
+  const meIsImpostor = impostorIds.includes(state.uid);
+  const won = meIsImpostor ? !impostorHit : impostorHit;
   return { won };
 }
 
@@ -270,8 +292,8 @@ function currentRoundKey(roomData = state.roomData) {
   if (!state.roomCode || !roomData) return "";
   const createdAt = roomData.createdAt || 0;
   const countdownEndsAt = roomData.countdownEndsAt || 0;
-  const impostorId = roomData.impostorId || "";
-  return `${state.roomCode}:${createdAt}:${countdownEndsAt}:${impostorId}`;
+  const impostorIds = getImpostorIds(roomData).sort().join(",");
+  return `${state.roomCode}:${createdAt}:${countdownEndsAt}:${impostorIds}`;
 }
 
 async function maybeRecordRoundStats() {
@@ -604,6 +626,7 @@ async function leaveLocalRoom() {
   state.roomCode = null;
   saveRoomSession("");
   state.roomData = null;
+  state.showRoomSettings = false;
   state.homeTab = "home";
   state.loading = false;
   if (state.uid) {
@@ -699,6 +722,9 @@ async function createRoom(nickname) {
       countdownEndsAt: 0,
       word: "",
       impostorId: "",
+      impostorIds: [],
+      level3HintEnabled: true,
+      impostorCount: 1,
       speakingOrder: [],
       players: {
         [state.uid]: {
@@ -864,6 +890,27 @@ async function updateLobbyProfile(change) {
   if (me?.cardColor) state.cardColor = me.cardColor;
 }
 
+async function updateRoomSettings(change) {
+  if (!isHost()) throw new Error("Somente o anfitrião pode alterar configurações.");
+  if (!state.roomCode || !state.roomData) throw new Error("Sala não encontrada.");
+  if (state.roomData.status !== "lobby") throw new Error("As configurações só podem ser alteradas no lobby.");
+
+  const playersCount = getPlayers().length;
+  const maxImpostors = getMaxImpostorCount(playersCount);
+  const nextHintEnabled = typeof change.level3HintEnabled === "boolean"
+    ? change.level3HintEnabled
+    : getRoomSettings().level3HintEnabled;
+  const nextImpostorCountRaw = Number.isInteger(change.impostorCount)
+    ? change.impostorCount
+    : getRoomSettings().impostorCount;
+  const nextImpostorCount = Math.max(1, Math.min(nextImpostorCountRaw, maxImpostors));
+
+  await update(ref(db, `rooms/${state.roomCode}`), {
+    level3HintEnabled: nextHintEnabled,
+    impostorCount: nextImpostorCount
+  });
+}
+
 async function tryResumeRoomSession() {
   if (!state.uid || state.roomCode) return false;
   const savedCode = getSavedRoomSession();
@@ -897,7 +944,11 @@ async function startGame() {
   if (players.length < 3) throw new Error("Minimo de 3 jogadores.");
 
   const word = getRandomWord();
-  const impostorId = players[Math.floor(Math.random() * players.length)].id;
+  const { impostorCount } = getRoomSettings();
+  const shuffledIds = shuffleArray(players.map((p) => p.id));
+  const chosenCount = Math.min(impostorCount, getMaxImpostorCount(players.length));
+  const impostorIds = shuffledIds.slice(0, chosenCount);
+  const impostorId = impostorIds[0] || "";
   const speakingOrder = shuffleArray(players.map((p) => p.id));
   const updates = {};
 
@@ -909,6 +960,7 @@ async function startGame() {
   updates[`rooms/${state.roomCode}/status`] = "countdown";
   updates[`rooms/${state.roomCode}/word`] = word;
   updates[`rooms/${state.roomCode}/impostorId`] = impostorId;
+  updates[`rooms/${state.roomCode}/impostorIds`] = impostorIds;
   updates[`rooms/${state.roomCode}/speakingOrder`] = speakingOrder;
   updates[`rooms/${state.roomCode}/countdownEndsAt`] = Date.now() + 5000;
 
@@ -967,6 +1019,7 @@ async function playAgain() {
   updates[`rooms/${state.roomCode}/status`] = "lobby";
   updates[`rooms/${state.roomCode}/word`] = "";
   updates[`rooms/${state.roomCode}/impostorId`] = "";
+  updates[`rooms/${state.roomCode}/impostorIds`] = [];
   updates[`rooms/${state.roomCode}/speakingOrder`] = [];
   updates[`rooms/${state.roomCode}/countdownEndsAt`] = 0;
 
@@ -1051,6 +1104,7 @@ function renderVoting(phaseFx = false) {
 
 function renderResults(revealed, phaseFx = false) {
   const players = getPlayers();
+  const impostorIds = getImpostorIds();
   const votes = {};
   players.forEach((p) => { votes[p.id] = 0; });
   players.forEach((p) => {
@@ -1060,8 +1114,9 @@ function renderResults(revealed, phaseFx = false) {
   const maxVotes = Math.max(...Object.values(votes), 0);
   const mostVoted = players.filter((p) => votes[p.id] === maxVotes && maxVotes > 0);
   const isTie = mostVoted.length > 1;
-  const impostor = players.find((p) => p.id === state.roomData.impostorId);
-  const correctVoters = players.filter((p) => p.vote === state.roomData.impostorId);
+  const impostors = players.filter((p) => impostorIds.includes(p.id));
+  const correctVoters = players.filter((p) => p.vote && impostorIds.includes(p.vote));
+  const impostorWasHit = !isTie && mostVoted.length === 1 && impostorIds.includes(mostVoted[0].id);
   const nickOf = (id) => players.find((p) => p.id === id)?.nickname || "Jogador desconectado";
 
   return `
@@ -1090,7 +1145,8 @@ function renderResults(revealed, phaseFx = false) {
           <div class="section-title" style="margin-bottom:8px;">Quem votou em quem</div>
           ${players.map((p) => p.vote ? `<div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:4px;"><strong style="color:var(--text)">${escapeHtml(p.nickname || "Sem nome")}</strong> votou em <strong style="color:var(--primary)">${escapeHtml(nickOf(p.vote))}</strong></div>` : "").join("")}
 
-          ${isTie ? '<div style="margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(255,200,0,0.1);border:1px solid rgba(255,200,0,0.3);font-size:0.85rem;color:#FFD700;">Empate! O impostor sobrevive.</div>' : ""}
+          ${isTie ? '<div style="margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(255,200,0,0.1);border:1px solid rgba(255,200,0,0.3);font-size:0.85rem;color:#FFD700;">Empate! Os impostores sobrevivem.</div>' : ""}
+          ${!isTie && !impostorWasHit ? '<div style="margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(255,77,77,0.12);border:1px solid rgba(255,77,77,0.32);font-size:0.85rem;color:#ff8f8f;">Ninguém votou em um impostor. Os impostores sobreviveram.</div>' : ""}
         </div>
 
         ${!revealed ? `
@@ -1098,14 +1154,14 @@ function renderResults(revealed, phaseFx = false) {
         ` : `
           <div>
             <div class="card impostor-reveal">
-              <p style="font-size:0.85rem;color:var(--text-muted)">O impostor era...</p>
-              <div class="impostor-name">${escapeHtml(impostor?.nickname || "Desconhecido")}</div>
+              <p style="font-size:0.85rem;color:var(--text-muted)">${impostors.length > 1 ? "Os impostores eram..." : "O impostor era..."}</p>
+              <div class="impostor-name">${impostors.length > 0 ? impostors.map((p) => escapeHtml(p.nickname || "Desconhecido")).join(", ") : "Desconhecido"}</div>
               <div class="divider"></div>
               <p style="font-size:0.85rem;color:var(--text-muted)">A palavra secreta era:</p>
               <div style="font-size:clamp(1.5rem,6vw,2rem);font-weight:900;color:var(--common);text-transform:uppercase;">${escapeHtml(state.roomData.word || "")}</div>
             </div>
 
-            ${correctVoters.length > 0 ? `<div class="card card-sm" style="margin-top:12px;"><p style="font-weight:700;color:var(--common);margin-bottom:6px;">Acertaram o impostor:</p>${correctVoters.map((p) => `<div>✓ ${escapeHtml(p.nickname || "Sem nome")}${p.id === state.uid ? " (você)" : ""}</div>`).join("")}</div>` : ""}
+            ${correctVoters.length > 0 ? `<div class="card card-sm" style="margin-top:12px;"><p style="font-weight:700;color:var(--common);margin-bottom:6px;">Acertaram um impostor:</p>${correctVoters.map((p) => `<div>✓ ${escapeHtml(p.nickname || "Sem nome")}${p.id === state.uid ? " (você)" : ""}</div>`).join("")}</div>` : ""}
 
             <div style="display:flex;flex-direction:column;gap:12px;margin-top:16px;">
               ${isHost() ? `
@@ -1422,6 +1478,8 @@ function renderLobby(phaseFx = false) {
   const players = getPlayers();
   const mine = myPlayer();
   const canStart = isHost() && players.length >= 3;
+  const settings = getRoomSettings();
+  const maxImpostors = getMaxImpostorCount(players.length);
   const myAvatar = mine?.avatar || state.avatar;
   const myCardColor = mine?.cardColor || state.cardColor;
 
@@ -1503,6 +1561,25 @@ function renderLobby(phaseFx = false) {
             <button class="btn btn-primary" data-action="start-game" ${canStart ? "" : "disabled"}>
               ${canStart ? `Iniciar Partida (${players.length} jogadores)` : `Aguardando jogadores (${players.length}/3 mínimo)`}
             </button>
+            <button class="btn btn-ghost" data-action="toggle-room-settings">Configuração da Partida</button>
+            ${state.showRoomSettings ? `
+              <div class="card card-sm">
+                <div class="section-title" style="margin-bottom:10px;">Configuração</div>
+                <div style="display:flex;flex-direction:column;gap:12px;">
+                  <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+                    <span style="font-size:0.9rem;color:var(--text);">Dica nível 3 do impostor</span>
+                    <input type="checkbox" data-action="settings-level3-toggle" ${settings.level3HintEnabled ? "checked" : ""} />
+                  </label>
+                  <label style="display:flex;flex-direction:column;gap:6px;">
+                    <span style="font-size:0.9rem;color:var(--text);">Quantidade de impostores</span>
+                    <select data-action="settings-impostor-count" style="width:100%;background:rgba(255,255,255,0.04);border:1.5px solid rgba(255,255,255,0.12);border-radius:12px;padding:10px 12px;color:var(--text);">
+                      ${Array.from({ length: maxImpostors }, (_, idx) => idx + 1).map((count) => `<option value="${count}" ${settings.impostorCount === count ? "selected" : ""}>${count}</option>`).join("")}
+                    </select>
+                    <span style="font-size:0.75rem;color:var(--text-muted);">Máximo atual: ${maxImpostors} (com ${players.length} jogadores).</span>
+                  </label>
+                </div>
+              </div>
+            ` : ""}
             <button class="btn btn-ghost" data-action="leave-room">Encerrar Sala</button>
           ` : `
             <div class="card card-sm text-center"><p>Aguardando o anfitrião iniciar<span class="waiting-dots"></span></p></div>
@@ -1531,10 +1608,12 @@ function renderCountdown(phaseFx = false) {
 function renderRevealing(phaseFx = false) {
   const me = myPlayer();
   const players = getPlayers();
+  const { level3HintEnabled } = getRoomSettings();
+  const impostorIds = getImpostorIds();
   const confirmedCount = players.filter((p) => p.confirmed).length;
-  const isImpostor = state.roomData.impostorId === state.uid;
+  const isImpostor = impostorIds.includes(state.uid);
   const impostorStarts = isImpostor && state.roomData?.speakingOrder?.[0] === state.uid;
-  const level3Hint = impostorStarts ? getLevel3Hint(state.roomData.word, state.roomCode) : "";
+  const level3Hint = impostorStarts && level3HintEnabled ? getLevel3Hint(state.roomData.word, state.roomCode) : "";
 
   return `
     <section class="screen${phaseFx ? " phase-enter" : ""}" data-phase="revealing">
@@ -1543,10 +1622,10 @@ function renderRevealing(phaseFx = false) {
         <div class="card role-card ${isImpostor ? "impostor" : "common"}">
           ${isImpostor ? `
             <span class="role-emoji">🔴</span>
-            <h2 style="color:var(--impostor)">Você é o IMPOSTOR!</h2>
+            <h2 style="color:var(--impostor)">${impostorIds.length > 1 ? "Você é um dos IMPOSTORES!" : "Você é o IMPOSTOR!"}</h2>
             <p>Você não recebeu a palavra secreta.</p>
             <div class="role-word secret">???</div>
-            ${impostorStarts ? `
+            ${impostorStarts && level3HintEnabled ? `
               <div class="card card-sm" style="margin-top:12px;background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.15);">
                 <p style="font-size:0.78rem;letter-spacing:0.08em;text-transform:uppercase;">Dica nível 3 (você começa)</p>
                 <div style="font-size:1.2rem;font-weight:800;color:#fff;margin-top:4px;text-transform:uppercase;">
@@ -1812,6 +1891,32 @@ function bindGameActions() {
       state.error = "";
     } catch (error) {
       setError(error.message || "Não foi possível iniciar.");
+    }
+  });
+
+  document.querySelector("[data-action='toggle-room-settings']")?.addEventListener("click", () => {
+    state.showRoomSettings = !state.showRoomSettings;
+    clearError();
+    render();
+  });
+
+  document.querySelector("[data-action='settings-level3-toggle']")?.addEventListener("change", async (event) => {
+    try {
+      const checked = !!event.target?.checked;
+      await updateRoomSettings({ level3HintEnabled: checked });
+      state.error = "";
+    } catch (error) {
+      setError(error.message || "Não foi possível atualizar configuração.");
+    }
+  });
+
+  document.querySelector("[data-action='settings-impostor-count']")?.addEventListener("change", async (event) => {
+    try {
+      const value = Number.parseInt(event.target?.value || "1", 10);
+      await updateRoomSettings({ impostorCount: Number.isNaN(value) ? 1 : value });
+      state.error = "";
+    } catch (error) {
+      setError(error.message || "Não foi possível atualizar configuração.");
     }
   });
 

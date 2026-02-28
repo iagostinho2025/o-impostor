@@ -92,6 +92,20 @@
         "impostorId": {
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid"
         },
+        "impostorIds": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          "$index": {
+            ".validate": "newData.isString() && root.child('rooms/' + $roomCode + '/players').child(newData.val()).exists()"
+          }
+        },
+        "level3HintEnabled": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          ".validate": "newData.isBoolean()"
+        },
+        "impostorCount": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 3"
+        },
         "speakingOrder": {
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid"
         },
