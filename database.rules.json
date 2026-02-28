@@ -106,11 +106,35 @@
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
           ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 3"
         },
+        "roundCount": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 5"
+        },
+        "currentRound": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 5"
+        },
+        "typedRound": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 5"
+        },
+        "typingCompleted": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          ".validate": "newData.isBoolean()"
+        },
         "typedResponses": {
           ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
           "$uid": {
             ".write": "auth != null && auth.uid === $uid && root.child('rooms/' + $roomCode + '/players').child(auth.uid).exists()",
             ".validate": "newData.isString() && newData.val().length >= 1 && newData.val().length <= 18"
+          }
+        },
+        "typedResponsesHistory": {
+          ".write": "auth != null && data.parent().child('hostId').val() === auth.uid",
+          "$round": {
+            "$uid": {
+              ".validate": "newData.isString() && newData.val().length >= 1 && newData.val().length <= 18"
+            }
           }
         },
         "speakingOrder": {

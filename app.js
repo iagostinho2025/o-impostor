@@ -174,9 +174,11 @@ function getRoomSettings(roomData = state.roomData) {
   const playersCount = Object.keys(roomData?.players || {}).length;
   const maxImpostors = getMaxImpostorCount(playersCount || 3);
   const configured = Number(roomData?.impostorCount) || 1;
+  const configuredRounds = Number(roomData?.roundCount) || 3;
   return {
     level3HintEnabled: roomData?.level3HintEnabled !== false,
-    impostorCount: Math.max(1, Math.min(configured, maxImpostors))
+    impostorCount: Math.max(1, Math.min(configured, maxImpostors)),
+    roundCount: Math.max(1, Math.min(configuredRounds, 5))
   };
 }
 
@@ -191,6 +193,10 @@ function sanitizeTypedResponse(text = "") {
 
 function getTypedResponses(roomData = state.roomData) {
   return roomData?.typedResponses || {};
+}
+
+function getTypedResponsesHistory(roomData = state.roomData) {
+  return roomData?.typedResponsesHistory || {};
 }
 
 function getMyTypedDraft(roomData = state.roomData) {
@@ -612,8 +618,10 @@ async function subscribeToRoom(code) {
     }
 
     const previousStatus = state.roomData?.status || "";
+    const previousTypedRound = Number(state.roomData?.typedRound) || 1;
     state.roomData = data;
-    if (data.status !== previousStatus && data.status === "typing") {
+    const nextTypedRound = Number(data.typedRound) || 1;
+    if ((data.status !== previousStatus && data.status === "typing") || (data.status === "typing" && nextTypedRound !== previousTypedRound)) {
       state.typingDraft = "";
       state.typingDraftDirty = false;
     }
@@ -637,6 +645,42 @@ async function maybeAutoAdvancePhase() {
 
   if (state.roomData.status === "voting" && players.every((p) => !!p.vote)) {
     await update(ref(db, `rooms/${state.roomCode}`), { status: "results" });
+  }
+
+  if (state.roomData.status === "typing") {
+    if (state.roomData.typingCompleted) return;
+    const responses = getTypedResponses();
+    const allSubmitted = players.every((p) => sanitizeTypedResponse(responses[p.id] || "").length >= 2);
+    if (!allSubmitted) return;
+
+    await runTransaction(ref(db, `rooms/${state.roomCode}`), (current) => {
+      if (!current || current.status !== "typing") return current;
+      const currentPlayers = Object.values(current.players || {});
+      if (currentPlayers.length === 0) return current;
+
+      const currentResponses = current.typedResponses || {};
+      const everyoneSent = currentPlayers.every((p) => sanitizeTypedResponse(currentResponses[p.id] || "").length >= 2);
+      if (!everyoneSent) return current;
+
+      const roomRoundCount = Math.max(1, Math.min(Number(current.roundCount) || 3, 5));
+      const currentTypedRound = Math.max(1, Math.min(Number(current.typedRound) || 1, roomRoundCount));
+      const history = current.typedResponsesHistory || {};
+
+      if (!history[currentTypedRound]) {
+        history[currentTypedRound] = { ...currentResponses };
+      }
+      current.typedResponsesHistory = history;
+
+      if (currentTypedRound < roomRoundCount) {
+        current.typedRound = currentTypedRound + 1;
+        current.typedResponses = {};
+        current.typingCompleted = false;
+      } else {
+        current.typingCompleted = true;
+      }
+
+      return current;
+    }, { applyLocally: false });
   }
 }
 
@@ -753,7 +797,12 @@ async function createRoom(nickname) {
       impostorIds: [],
       level3HintEnabled: true,
       impostorCount: 1,
+      roundCount: 3,
+      currentRound: 1,
       typedResponses: {},
+      typedResponsesHistory: {},
+      typedRound: 1,
+      typingCompleted: false,
       speakingOrder: [],
       players: {
         [state.uid]: {
@@ -933,10 +982,15 @@ async function updateRoomSettings(change) {
     ? change.impostorCount
     : getRoomSettings().impostorCount;
   const nextImpostorCount = Math.max(1, Math.min(nextImpostorCountRaw, maxImpostors));
+  const nextRoundCountRaw = Number.isInteger(change.roundCount)
+    ? change.roundCount
+    : getRoomSettings().roundCount;
+  const nextRoundCount = Math.max(1, Math.min(nextRoundCountRaw, 5));
 
   await update(ref(db, `rooms/${state.roomCode}`), {
     level3HintEnabled: nextHintEnabled,
-    impostorCount: nextImpostorCount
+    impostorCount: nextImpostorCount,
+    roundCount: nextRoundCount
   });
 }
 
@@ -991,6 +1045,10 @@ async function startGame() {
   updates[`rooms/${state.roomCode}/impostorId`] = impostorId;
   updates[`rooms/${state.roomCode}/impostorIds`] = impostorIds;
   updates[`rooms/${state.roomCode}/typedResponses`] = null;
+  updates[`rooms/${state.roomCode}/typedResponsesHistory`] = null;
+  updates[`rooms/${state.roomCode}/typedRound`] = 1;
+  updates[`rooms/${state.roomCode}/typingCompleted`] = false;
+  updates[`rooms/${state.roomCode}/currentRound`] = 1;
   updates[`rooms/${state.roomCode}/speakingOrder`] = speakingOrder;
   updates[`rooms/${state.roomCode}/countdownEndsAt`] = Date.now() + 5000;
 
@@ -1009,6 +1067,17 @@ async function confirmRole() {
 
 async function goToVoting() {
   if (!isHost()) throw new Error("Somente o anfitrião pode iniciar votação.");
+  const settings = getRoomSettings();
+  const status = state.roomData?.status;
+  const currentRound = Math.max(1, Math.min(Number(state.roomData?.currentRound) || 1, settings.roundCount));
+  const typingCompleted = !!state.roomData?.typingCompleted;
+
+  if (status === "playing" && currentRound < settings.roundCount) {
+    throw new Error(`Conclua as ${settings.roundCount} rodadas de fala antes da votação.`);
+  }
+  if (status === "typing" && !typingCompleted) {
+    throw new Error(`Aguardando todos enviarem as ${settings.roundCount} rodadas de resposta.`);
+  }
 
   const players = getPlayers();
   const updates = {};
@@ -1026,7 +1095,23 @@ async function goToTyping() {
 
   await update(ref(db, `rooms/${state.roomCode}`), {
     status: "typing",
-    typedResponses: null
+    typedResponses: null,
+    typedResponsesHistory: null,
+    typedRound: 1,
+    typingCompleted: false
+  });
+}
+
+async function advancePlayingRound() {
+  if (!isHost()) throw new Error("Somente o anfitrião pode avançar rodada.");
+  if (state.roomData?.status !== "playing") throw new Error("As rodadas de fala só avançam na fase de dicas.");
+
+  const { roundCount } = getRoomSettings();
+  const currentRound = Math.max(1, Math.min(Number(state.roomData?.currentRound) || 1, roundCount));
+  if (currentRound >= roundCount) throw new Error("Você já está na última rodada configurada.");
+
+  await update(ref(db, `rooms/${state.roomCode}`), {
+    currentRound: currentRound + 1
   });
 }
 
@@ -1073,6 +1158,10 @@ async function playAgain() {
   updates[`rooms/${state.roomCode}/impostorId`] = "";
   updates[`rooms/${state.roomCode}/impostorIds`] = [];
   updates[`rooms/${state.roomCode}/typedResponses`] = null;
+  updates[`rooms/${state.roomCode}/typedResponsesHistory`] = null;
+  updates[`rooms/${state.roomCode}/typedRound`] = 1;
+  updates[`rooms/${state.roomCode}/typingCompleted`] = false;
+  updates[`rooms/${state.roomCode}/currentRound`] = 1;
   updates[`rooms/${state.roomCode}/speakingOrder`] = [];
   updates[`rooms/${state.roomCode}/countdownEndsAt`] = 0;
 
@@ -1114,6 +1203,11 @@ function renderVoting(phaseFx = false) {
   const players = getPlayers();
   const responses = getTypedResponses();
   const hasTypedResponses = players.some((p) => sanitizeTypedResponse(responses[p.id] || "").length >= 2);
+  const typedHistory = getTypedResponsesHistory();
+  const historyRounds = Object.keys(typedHistory)
+    .map((key) => Number.parseInt(key, 10))
+    .filter((num) => !Number.isNaN(num))
+    .sort((a, b) => a - b);
   const mine = myPlayer();
   const myVote = mine?.vote || "";
   const votedCount = players.filter((p) => !!p.vote).length;
@@ -1132,20 +1226,27 @@ function renderVoting(phaseFx = false) {
           <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${progress}%;"></div></div>
         </div>
 
-        ${hasTypedResponses ? `
+        ${(hasTypedResponses || historyRounds.length > 0) ? `
           <div class="card card-sm">
             <div class="section-title" style="margin-bottom:10px;">Respostas Digitadas</div>
             <div class="typing-response-grid">
               ${players.map((p) => {
-                const response = sanitizeTypedResponse(responses[p.id] || "");
-                const ready = response.length >= 2;
+                const latestResponse = sanitizeTypedResponse(responses[p.id] || "");
+                const ready = latestResponse.length >= 2 || historyRounds.some((round) => sanitizeTypedResponse(typedHistory[round]?.[p.id] || "").length >= 2);
                 return `
                   <div class="typing-response-item ${ready ? "ready" : ""}">
                     <div class="typing-response-head">
                       <div class="player-avatar" style="width:28px;height:28px;font-size:0.78rem;background:${escapeHtml(getPlayerColor(p))};">${escapeHtml(getPlayerAvatar(p))}</div>
                       <strong>${escapeHtml(p.nickname || "Sem nome")}</strong>
                     </div>
-                    <div class="typing-response-text">${ready ? escapeHtml(response) : "Sem resposta"}</div>
+                    <div style="display:flex;flex-direction:column;gap:6px;">
+                      ${historyRounds.map((round) => {
+                        const roundResponse = sanitizeTypedResponse(typedHistory[round]?.[p.id] || "");
+                        return `<div class="typing-response-text">R${round}: ${roundResponse ? escapeHtml(roundResponse) : "Sem resposta"}</div>`;
+                      }).join("")}
+                      ${historyRounds.length === 0 && ready ? `<div class="typing-response-text">${escapeHtml(latestResponse)}</div>` : ""}
+                      ${historyRounds.length === 0 && !ready ? '<div class="typing-response-text">Sem resposta</div>' : ""}
+                    </div>
                   </div>
                 `;
               }).join("")}
@@ -1221,8 +1322,8 @@ function renderResults(revealed, phaseFx = false) {
           <div class="section-title" style="margin-bottom:8px;">Quem votou em quem</div>
           ${players.map((p) => p.vote ? `<div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:4px;"><strong style="color:var(--text)">${escapeHtml(p.nickname || "Sem nome")}</strong> votou em <strong style="color:var(--primary)">${escapeHtml(nickOf(p.vote))}</strong></div>` : "").join("")}
 
-          ${isTie ? '<div style="margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(255,200,0,0.1);border:1px solid rgba(255,200,0,0.3);font-size:0.85rem;color:#FFD700;">Empate! Os impostores sobrevivem.</div>' : ""}
-          ${!isTie && !impostorWasHit ? '<div style="margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(255,77,77,0.12);border:1px solid rgba(255,77,77,0.32);font-size:0.85rem;color:#ff8f8f;">Ninguém votou em um impostor. Os impostores sobreviveram.</div>' : ""}
+          ${revealed && isTie ? '<div style="margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(255,200,0,0.1);border:1px solid rgba(255,200,0,0.3);font-size:0.85rem;color:#FFD700;">Empate! Os impostores sobrevivem.</div>' : ""}
+          ${revealed && !isTie && !impostorWasHit ? '<div style="margin-top:12px;padding:10px 14px;border-radius:8px;background:rgba(255,77,77,0.12);border:1px solid rgba(255,77,77,0.32);font-size:0.85rem;color:#ff8f8f;">Ninguém votou em um impostor. Os impostores sobreviveram.</div>' : ""}
         </div>
 
         ${!revealed ? `
@@ -1654,6 +1755,13 @@ function renderLobby(phaseFx = false) {
                     </select>
                     <span style="font-size:0.75rem;color:var(--text-muted);">Máximo atual: ${maxImpostors} (com ${players.length} jogadores).</span>
                   </label>
+                  <label style="display:flex;flex-direction:column;gap:6px;">
+                    <span style="font-size:0.9rem;color:var(--text);">Quantidade de rodadas</span>
+                    <select data-action="settings-round-count" style="width:100%;background:rgba(255,255,255,0.04);border:1.5px solid rgba(255,255,255,0.12);border-radius:12px;padding:10px 12px;color:var(--text);">
+                      ${Array.from({ length: 5 }, (_, idx) => idx + 1).map((count) => `<option value="${count}" ${settings.roundCount === count ? "selected" : ""}>${count}</option>`).join("")}
+                    </select>
+                    <span style="font-size:0.75rem;color:var(--text-muted);">Define quantas vezes cada pessoa fala/digita antes da votação.</span>
+                  </label>
                 </div>
               </div>
             ` : ""}
@@ -1736,6 +1844,9 @@ function renderRevealing(phaseFx = false) {
 function renderTyping(phaseFx = false) {
   const players = getPlayers();
   const responses = getTypedResponses();
+  const { roundCount } = getRoomSettings();
+  const typedRound = Math.max(1, Math.min(Number(state.roomData?.typedRound) || 1, roundCount));
+  const typingCompleted = !!state.roomData?.typingCompleted;
   const submittedCount = players.filter((p) => sanitizeTypedResponse(responses[p.id] || "").length >= 2).length;
   const myDraft = getMyTypedDraft();
   const keyboardRows = [
@@ -1750,7 +1861,7 @@ function renderTyping(phaseFx = false) {
         <div class="card typing-hero">
           <div class="section-title" style="margin-bottom:8px;">Modo Digitar Respostas</div>
           <h2 style="margin-bottom:8px;">Teclado em tempo real</h2>
-          <p>Todos veem as respostas conforme cada jogador confirma sua dica.</p>
+          <p>Rodada ${typedRound} de ${roundCount} · Todos veem as respostas conforme cada jogador confirma sua dica.</p>
         </div>
 
         <div class="card typing-console">
@@ -1772,7 +1883,7 @@ function renderTyping(phaseFx = false) {
             </div>
           </div>
 
-          <button class="btn btn-primary" data-action="submit-typed-response">${sanitizeTypedResponse(responses[state.uid] || "").length >= 2 ? "Atualizar resposta" : "Confirmar resposta"}</button>
+          <button class="btn btn-primary" data-action="submit-typed-response" ${typingCompleted ? "disabled" : ""}>${typingCompleted ? "Rodadas concluídas" : (sanitizeTypedResponse(responses[state.uid] || "").length >= 2 ? "Atualizar resposta" : "Confirmar resposta")}</button>
         </div>
 
         <div class="card">
@@ -1797,9 +1908,15 @@ function renderTyping(phaseFx = false) {
           </div>
         </div>
 
+        ${typingCompleted ? `
+          <div class="card card-sm text-center">
+            <p>Todas as ${roundCount} rodadas de digitação foram concluídas.</p>
+          </div>
+        ` : ""}
+
         ${isHost()
-          ? '<button class="btn btn-danger" data-action="go-voting">Ir para Votação</button>'
-          : '<div class="card card-sm text-center"><p>Aguardando o anfitrião iniciar a votação.</p></div>'}
+          ? `<button class="btn btn-danger" data-action="go-voting" ${typingCompleted ? "" : "disabled"}>Ir para Votação</button>`
+          : '<div class="card card-sm text-center"><p>Aguardando todos concluírem as rodadas de digitação.</p></div>'}
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
       </div>
     </section>
@@ -1808,6 +1925,8 @@ function renderTyping(phaseFx = false) {
 
 function renderPlaying(phaseFx = false) {
   const players = getPlayers();
+  const { roundCount } = getRoomSettings();
+  const currentRound = Math.max(1, Math.min(Number(state.roomData?.currentRound) || 1, roundCount));
   const order = state.roomData.speakingOrder || [];
   const nickOf = (id) => players.find((p) => p.id === id)?.nickname || "Jogador desconectado";
   const playerOf = (id) => getPlayerById(id);
@@ -1819,6 +1938,7 @@ function renderPlaying(phaseFx = false) {
         <div class="card text-center">
           <h2>Fase de Dicas</h2>
           <p>Cada jogador fala uma palavra relacionada. O impostor tentara blefar.</p>
+          <p style="margin-top:6px;font-weight:700;color:var(--primary);">Rodada ${currentRound} de ${roundCount}</p>
         </div>
 
         <div class="highlight-box">
@@ -1840,6 +1960,9 @@ function renderPlaying(phaseFx = false) {
 
         ${isHost() ? `
           <div style="display:flex;flex-direction:column;gap:10px;">
+            <button class="btn btn-ghost" data-action="advance-playing-round" ${currentRound >= roundCount ? "disabled" : ""}>
+              ${currentRound >= roundCount ? "Última rodada concluída" : `Próxima rodada (${currentRound + 1}/${roundCount})`}
+            </button>
             <button class="btn btn-primary" data-action="go-typing">Digitar Respostas</button>
             <button class="btn btn-danger" data-action="go-voting">Ir para Votação</button>
           </div>
@@ -2073,6 +2196,16 @@ function bindGameActions() {
     }
   });
 
+  document.querySelector("[data-action='settings-round-count']")?.addEventListener("change", async (event) => {
+    try {
+      const value = Number.parseInt(event.target?.value || "3", 10);
+      await updateRoomSettings({ roundCount: Number.isNaN(value) ? 3 : value });
+      state.error = "";
+    } catch (error) {
+      setError(error.message || "Não foi possível atualizar configuração.");
+    }
+  });
+
   document.querySelectorAll("[data-action='lobby-pick-avatar']").forEach((el) => {
     el.addEventListener("click", async () => {
       const avatar = el.getAttribute("data-avatar");
@@ -2125,6 +2258,15 @@ function bindGameActions() {
       state.error = "";
     } catch (error) {
       setError(error.message || "Não foi possível iniciar modo de digitação.");
+    }
+  });
+
+  document.querySelector("[data-action='advance-playing-round']")?.addEventListener("click", async () => {
+    try {
+      await advancePlayingRound();
+      state.error = "";
+    } catch (error) {
+      setError(error.message || "Não foi possível avançar rodada.");
     }
   });
 
