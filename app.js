@@ -166,6 +166,11 @@ function getImpostorIds(roomData = state.roomData) {
   return legacy ? [legacy] : [];
 }
 
+function sameOrderedIds(a = [], b = []) {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
+
 function getMaxImpostorCount(playersCount) {
   return Math.max(1, Math.min(3, playersCount - 1));
 }
@@ -625,12 +630,74 @@ async function subscribeToRoom(code) {
       state.typingDraft = "";
       state.typingDraftDirty = false;
     }
+    await maybeSanitizeRoomState();
     maybeRunCountdown();
-    await maybeAutoAdvancePhase();
     await maybeRecoverHost();
+    await maybeAutoAdvancePhase();
     await maybeRecordRoundStats();
     render();
   });
+}
+
+async function maybeSanitizeRoomState() {
+  if (!isHost() || !state.roomCode || !state.roomData) return;
+
+  const room = state.roomData;
+  const playersMap = room.players || {};
+  const playerIds = Object.keys(playersMap);
+  if (playerIds.length === 0) return;
+
+  const validIds = new Set(playerIds);
+  const updates = {};
+  let dirty = false;
+  const setRoomField = (fieldPath, value) => {
+    updates[`rooms/${state.roomCode}/${fieldPath}`] = value;
+    dirty = true;
+  };
+
+  const currentOrder = Array.isArray(room.speakingOrder) ? room.speakingOrder : [];
+  const nextOrder = currentOrder.filter((id) => validIds.has(id));
+  if (!sameOrderedIds(currentOrder, nextOrder)) {
+    setRoomField("speakingOrder", nextOrder);
+  }
+
+  const currentImpostors = getImpostorIds(room);
+  const nextImpostors = currentImpostors.filter((id) => validIds.has(id));
+  if (!sameOrderedIds(currentImpostors, nextImpostors)) {
+    setRoomField("impostorIds", nextImpostors.length > 0 ? nextImpostors : []);
+  }
+  const legacyImpostorId = room.impostorId || "";
+  const nextLegacyImpostorId = nextImpostors[0] || "";
+  if (legacyImpostorId !== nextLegacyImpostorId) {
+    setRoomField("impostorId", nextLegacyImpostorId);
+  }
+
+  playerIds.forEach((id) => {
+    const vote = playersMap[id]?.vote || "";
+    if (vote && !validIds.has(vote)) {
+      setRoomField(`players/${id}/vote`, "");
+    }
+  });
+
+  const typedResponses = room.typedResponses || {};
+  Object.keys(typedResponses).forEach((responseUid) => {
+    if (!validIds.has(responseUid)) {
+      setRoomField(`typedResponses/${responseUid}`, null);
+    }
+  });
+
+  const typedResponsesHistory = room.typedResponsesHistory || {};
+  Object.entries(typedResponsesHistory).forEach(([roundKey, roundEntries]) => {
+    if (!roundEntries || typeof roundEntries !== "object") return;
+    Object.keys(roundEntries).forEach((responseUid) => {
+      if (!validIds.has(responseUid)) {
+        setRoomField(`typedResponsesHistory/${roundKey}/${responseUid}`, null);
+      }
+    });
+  });
+
+  if (!dirty) return;
+  await update(ref(db), updates);
 }
 
 async function maybeAutoAdvancePhase() {
@@ -726,18 +793,16 @@ async function maybeRecoverHost() {
   const ordered = players.slice().sort((a, b) => a.joinedAt - b.joinedAt);
   const nextHost = ordered[0];
   if (!nextHost) return;
-
-  await runTransaction(ref(db, `rooms/${state.roomCode}`), (current) => {
-    if (!current || (current.hostId && current.players?.[current.hostId])) {
-      return current;
-    }
-
-    current.hostId = nextHost.id;
-    if (current.players?.[nextHost.id]) {
-      current.players[nextHost.id].isHost = true;
-    }
-    return current;
-  }, { applyLocally: false });
+  try {
+    await runTransaction(ref(db, `rooms/${state.roomCode}/hostId`), (currentHostId) => {
+      if (currentHostId && room.players?.[currentHostId]) {
+        return currentHostId;
+      }
+      return nextHost.id;
+    }, { applyLocally: false });
+  } catch {
+    // no-op
+  }
 }
 
 function maybeRunCountdown() {
@@ -1199,6 +1264,12 @@ async function leaveRoom() {
 
   await leaveLocalRoom();
 }
+
+function renderLeaveRoomButton() {
+  const label = isHost() ? "Sair da sala (passar anfitrião)" : "Sair da sala";
+  return `<button class="btn btn-ghost" data-action="leave-room">${label}</button>`;
+}
+
 function renderVoting(phaseFx = false) {
   const players = getPlayers();
   const responses = getTypedResponses();
@@ -1273,6 +1344,7 @@ function renderVoting(phaseFx = false) {
           </div>
           ${myVote ? '<p style="margin-top:10px;font-size:0.8rem;color:var(--common);font-weight:700;">Voto confirmado. Aguarde os demais jogadores.</p>' : ""}
         </div>
+        ${renderLeaveRoomButton()}
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
       </div>
     </section>
@@ -1349,6 +1421,7 @@ function renderResults(revealed, phaseFx = false) {
           </div>
         `}
 
+        ${renderLeaveRoomButton()}
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
       </div>
     </section>
@@ -1765,10 +1838,10 @@ function renderLobby(phaseFx = false) {
                 </div>
               </div>
             ` : ""}
-            <button class="btn btn-ghost" data-action="leave-room">Encerrar Sala</button>
+            ${renderLeaveRoomButton()}
           ` : `
             <div class="card card-sm text-center"><p>Aguardando o anfitrião iniciar<span class="waiting-dots"></span></p></div>
-            <button class="btn btn-ghost" data-action="leave-room">Sair da Sala</button>
+            ${renderLeaveRoomButton()}
           `}
         </div>
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
@@ -1781,10 +1854,13 @@ function renderCountdown(phaseFx = false) {
   const count = state.countdownLeft;
   return `
     <section class="screen${phaseFx ? " phase-enter" : ""}" data-phase="countdown">
-      <div style="text-align:center;position:relative;z-index:1;">
-        <p style="font-size:1rem;color:var(--text-muted);margin-bottom:16px;">Prepare-se!</p>
-        <div class="countdown-number">${count > 0 ? count : "Vai!"}</div>
-        <p style="margin-top:24px;color:var(--text-muted);font-size:0.9rem;">Cada jogador vai ver o seu papel em seguida.</p>
+      <div class="screen-inner">
+        <div style="text-align:center;position:relative;z-index:1;">
+          <p style="font-size:1rem;color:var(--text-muted);margin-bottom:16px;">Prepare-se!</p>
+          <div class="countdown-number">${count > 0 ? count : "Vai!"}</div>
+          <p style="margin-top:24px;color:var(--text-muted);font-size:0.9rem;">Cada jogador vai ver o seu papel em seguida.</p>
+        </div>
+        ${renderLeaveRoomButton()}
       </div>
     </section>
   `;
@@ -1835,6 +1911,7 @@ function renderRevealing(phaseFx = false) {
           <div style="margin-bottom:8px;" class="text-center text-muted">${confirmedCount} de ${players.length} jogadores confirmaram</div>
           <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${players.length ? (confirmedCount / players.length) * 100 : 0}%;"></div></div>
         </div>
+        ${renderLeaveRoomButton()}
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
       </div>
     </section>
@@ -1917,6 +1994,7 @@ function renderTyping(phaseFx = false) {
         ${isHost()
           ? `<button class="btn btn-danger" data-action="go-voting" ${typingCompleted ? "" : "disabled"}>Ir para Votação</button>`
           : '<div class="card card-sm text-center"><p>Aguardando todos concluírem as rodadas de digitação.</p></div>'}
+        ${renderLeaveRoomButton()}
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
       </div>
     </section>
@@ -1969,6 +2047,7 @@ function renderPlaying(phaseFx = false) {
         ` : `
           <div class="card card-sm text-center"><p>O anfitrião pode seguir para votação ou abrir o modo Digitar Respostas.</p></div>
         `}
+        ${renderLeaveRoomButton()}
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
       </div>
     </section>
