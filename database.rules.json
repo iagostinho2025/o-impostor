@@ -102,9 +102,10 @@
           ".validate": "newData.isString() && newData.val() === $roomCode"
         },
         "players": {
+          ".write": "auth != null && (root.child('rooms/' + $roomCode + '/hostId').val() === auth.uid || root.child('rooms/' + $roomCode + '/status').val() === 'lobby')",
           "$uid": {
             ".read": "auth != null && data.parent().child(auth.uid).exists()",
-            ".write": "auth != null && ((auth.uid === $uid && (data.exists() || root.child('rooms/' + $roomCode + '/status').val() === 'lobby')) || root.child('rooms/' + $roomCode + '/hostId').val() === auth.uid)",
+            ".write": "auth != null && (data.parent().parent().child('hostId').val() === auth.uid || newData.parent().parent().child('hostId').val() === auth.uid || (auth.uid === $uid && ((!data.exists() && newData.exists() && newData.parent().parent().child('status').val() === 'lobby') || (data.exists() && !newData.exists()) || (data.exists() && newData.exists() && newData.child('id').val() === data.child('id').val() && newData.child('joinedAt').val() === data.child('joinedAt').val() && newData.child('isHost').val() === data.child('isHost').val()))))",
             "id": {
               ".validate": "newData.isString() && newData.val() === $uid"
             },

@@ -67,6 +67,7 @@ const HUB_TABS = [
   { id: "profile", icon: "✨", label: "Perfil" }
 ];
 const NICKNAME_PREF_KEY = "impostor_nickname";
+const ROOM_SESSION_KEY = "impostor_last_room";
 
 state.avatar = AVATAR_OPTIONS[0];
 state.cardColor = CARD_COLOR_OPTIONS[0];
@@ -168,6 +169,31 @@ function saveNicknameLocally(nickname) {
     localStorage.setItem(NICKNAME_PREF_KEY, nickname);
   } catch {
     // no-op
+  }
+}
+
+function saveRoomSession(roomCode) {
+  try {
+    if (roomCode) {
+      localStorage.setItem(ROOM_SESSION_KEY, roomCode);
+      return;
+    }
+    localStorage.removeItem(ROOM_SESSION_KEY);
+  } catch {
+    // no-op
+  }
+}
+
+function getSavedRoomSession() {
+  try {
+    const code = (localStorage.getItem(ROOM_SESSION_KEY) || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "")
+      .slice(0, 4);
+    return code.length === 4 ? code : "";
+  } catch {
+    return "";
   }
 }
 
@@ -408,6 +434,9 @@ function startConnectionPresenceSync() {
         roomCode: state.roomCode || "",
         lastSeenAt: Date.now()
       });
+      if (state.roomCode) {
+        await attachPresence(state.roomCode);
+      }
     } catch {
       // no-op
     }
@@ -507,23 +536,31 @@ async function clearDisconnectHook() {
 async function attachPresence(roomCode) {
   const playerRef = ref(db, `rooms/${roomCode}/players/${state.uid}`);
   state.disconnectRef = playerRef;
-  await onDisconnect(playerRef).remove();
+  await onDisconnect(playerRef).update({
+    connected: false,
+    lastSeenAt: serverTimestamp()
+  });
   await update(playerRef, {
     lastSeenAt: serverTimestamp(),
     connected: true
   });
   if (state.uid) {
-    await update(ref(db, `userPresence/${state.uid}`), {
-      online: true,
-      roomCode: roomCode || "",
-      lastSeenAt: Date.now()
-    });
+    try {
+      await update(ref(db, `userPresence/${state.uid}`), {
+        online: true,
+        roomCode: roomCode || "",
+        lastSeenAt: Date.now()
+      });
+    } catch {
+      // no-op
+    }
   }
 }
 
 async function subscribeToRoom(code) {
   clearRoomSubscription();
   state.roomCode = code;
+  saveRoomSession(code);
   state.roomUnsub = onValue(ref(db, `rooms/${code}`), async (snap) => {
     const data = snap.val();
     if (!data) {
@@ -565,15 +602,20 @@ async function leaveLocalRoom() {
   state.copyFeedback = false;
   await clearDisconnectHook();
   state.roomCode = null;
+  saveRoomSession("");
   state.roomData = null;
   state.homeTab = "home";
   state.loading = false;
   if (state.uid) {
-    await update(ref(db, `userPresence/${state.uid}`), {
-      online: true,
-      roomCode: "",
-      lastSeenAt: Date.now()
-    });
+    try {
+      await update(ref(db, `userPresence/${state.uid}`), {
+        online: true,
+        roomCode: "",
+        lastSeenAt: Date.now()
+      });
+    } catch {
+      // no-op
+    }
   }
   render();
 }
@@ -638,6 +680,9 @@ function maybeRunCountdown() {
 }
 
 async function createRoom(nickname) {
+  if (!state.uid) {
+    throw new Error("Conectando ao servidor. Tente novamente.");
+  }
   const safeNick = nickname.trim();
   if (safeNick.length < 2 || safeNick.length > 16) {
     throw new Error("Apelido inválido.");
@@ -687,6 +732,9 @@ async function createRoom(nickname) {
 }
 
 async function joinRoom(nickname, roomCodeRaw) {
+  if (!state.uid) {
+    throw new Error("Conectando ao servidor. Tente novamente.");
+  }
   const safeNick = nickname.trim();
   const roomCode = roomCodeRaw.trim().toUpperCase();
 
@@ -703,8 +751,14 @@ async function joinRoom(nickname, roomCodeRaw) {
   }
 
   const roomData = roomSnap.val();
-  if (roomData.status !== "lobby") {
+  const alreadyInsideRoom = !!roomData?.players?.[state.uid];
+  if (roomData.status !== "lobby" && !alreadyInsideRoom) {
     throw new Error("Partida já em andamento.");
+  }
+  if (alreadyInsideRoom) {
+    await subscribeToRoom(roomCode);
+    await attachPresence(roomCode);
+    return;
   }
 
   let joinError = "Não foi possível entrar na sala.";
@@ -761,6 +815,7 @@ async function joinRoom(nickname, roomCodeRaw) {
 }
 
 async function updateLobbyProfile(change) {
+  if (!state.uid) throw new Error("Conectando ao servidor. Tente novamente.");
   if (!state.roomCode || !state.uid) throw new Error("Sala não encontrada.");
 
   const playersRef = ref(db, `rooms/${state.roomCode}/players`);
@@ -807,6 +862,32 @@ async function updateLobbyProfile(change) {
   const me = tx.snapshot?.val()?.[state.uid];
   if (me?.avatar) state.avatar = me.avatar;
   if (me?.cardColor) state.cardColor = me.cardColor;
+}
+
+async function tryResumeRoomSession() {
+  if (!state.uid || state.roomCode) return false;
+  const savedCode = getSavedRoomSession();
+  if (!savedCode) return false;
+
+  try {
+    const roomSnap = await get(ref(db, `rooms/${savedCode}`));
+    if (!roomSnap.exists()) {
+      saveRoomSession("");
+      return false;
+    }
+
+    const roomData = roomSnap.val() || {};
+    if (!roomData.players?.[state.uid]) {
+      saveRoomSession("");
+      return false;
+    }
+
+    await subscribeToRoom(savedCode);
+    await attachPresence(savedCode);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function startGame() {
@@ -981,7 +1062,7 @@ function renderResults(revealed, phaseFx = false) {
   const isTie = mostVoted.length > 1;
   const impostor = players.find((p) => p.id === state.roomData.impostorId);
   const correctVoters = players.filter((p) => p.vote === state.roomData.impostorId);
-  const nickOf = (id) => players.find((p) => p.id === id)?.nickname || id;
+  const nickOf = (id) => players.find((p) => p.id === id)?.nickname || "Jogador desconectado";
 
   return `
     <section class="screen${phaseFx ? " phase-enter" : ""}${revealed && phaseFx ? " reveal-enter" : ""}" data-phase="${revealed ? "reveal" : "results"}">
@@ -1499,7 +1580,7 @@ function renderRevealing(phaseFx = false) {
 function renderPlaying(phaseFx = false) {
   const players = getPlayers();
   const order = state.roomData.speakingOrder || [];
-  const nickOf = (id) => players.find((p) => p.id === id)?.nickname || id;
+  const nickOf = (id) => players.find((p) => p.id === id)?.nickname || "Jogador desconectado";
   const playerOf = (id) => getPlayerById(id);
   const firstId = order[0];
 
@@ -1854,6 +1935,7 @@ onAuthStateChanged(auth, async (user) => {
     // no-op
   });
   startConnectionPresenceSync();
+  await tryResumeRoomSession();
   render();
 });
 
@@ -1864,6 +1946,21 @@ window.addEventListener("beforeunload", () => {
   clearSocialSubscriptions();
   stopConnectionPresenceSync();
   clearPresenceHook();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (!state.uid || !state.roomCode) return;
+  attachPresence(state.roomCode).catch(() => {
+    // no-op
+  });
+});
+
+window.addEventListener("pageshow", () => {
+  if (!state.uid || !state.roomCode) return;
+  attachPresence(state.roomCode).catch(() => {
+    // no-op
+  });
 });
 
 render();
