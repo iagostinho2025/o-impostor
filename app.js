@@ -209,6 +209,18 @@ function getMyTypedDraft(roomData = state.roomData) {
   return state.typingDraftDirty ? state.typingDraft : saved;
 }
 
+function getTypingPendingPlayers(roomData = state.roomData) {
+  const responses = getTypedResponses(roomData);
+  return getPlayers(roomData).filter((p) => sanitizeTypedResponse(responses[p.id] || "").length < 2);
+}
+
+function getTypingCompletedRounds(roomData = state.roomData) {
+  const { roundCount } = getRoomSettings(roomData);
+  const typedRound = Math.max(1, Math.min(Number(roomData?.typedRound) || 1, roundCount));
+  if (roomData?.typingCompleted) return roundCount;
+  return Math.max(0, Math.min(typedRound - 1, roundCount));
+}
+
 function setError(message) {
   state.error = message || "";
   render();
@@ -716,39 +728,67 @@ async function maybeAutoAdvancePhase() {
 
   if (state.roomData.status === "typing") {
     if (state.roomData.typingCompleted) return;
-    const responses = getTypedResponses();
-    const allSubmitted = players.every((p) => sanitizeTypedResponse(responses[p.id] || "").length >= 2);
+    const pendingPlayers = getTypingPendingPlayers();
+    const allSubmitted = pendingPlayers.length === 0;
     if (!allSubmitted) return;
-
-    await runTransaction(ref(db, `rooms/${state.roomCode}`), (current) => {
-      if (!current || current.status !== "typing") return current;
-      const currentPlayers = Object.values(current.players || {});
-      if (currentPlayers.length === 0) return current;
-
-      const currentResponses = current.typedResponses || {};
-      const everyoneSent = currentPlayers.every((p) => sanitizeTypedResponse(currentResponses[p.id] || "").length >= 2);
-      if (!everyoneSent) return current;
-
-      const roomRoundCount = Math.max(1, Math.min(Number(current.roundCount) || 3, 5));
-      const currentTypedRound = Math.max(1, Math.min(Number(current.typedRound) || 1, roomRoundCount));
-      const history = current.typedResponsesHistory || {};
-
-      if (!history[currentTypedRound]) {
-        history[currentTypedRound] = { ...currentResponses };
-      }
-      current.typedResponsesHistory = history;
-
-      if (currentTypedRound < roomRoundCount) {
-        current.typedRound = currentTypedRound + 1;
-        current.typedResponses = {};
-        current.typingCompleted = false;
-      } else {
-        current.typingCompleted = true;
-      }
-
-      return current;
-    }, { applyLocally: false });
+    await finalizeTypingPhase({ forceFinish: false });
   }
+}
+
+async function finalizeTypingPhase({ forceFinish = false } = {}) {
+  if (!isHost()) throw new Error("Somente o anfitrião pode finalizar a digitação.");
+  if (!state.roomCode) throw new Error("Sala não encontrada.");
+
+  const roomSnap = await get(ref(db, `rooms/${state.roomCode}`));
+  if (!roomSnap.exists()) return { changed: false, completed: true };
+
+  const room = roomSnap.val() || {};
+  if (room.status !== "typing") {
+    return { changed: false, completed: true };
+  }
+
+  const players = Object.values(room.players || {});
+  if (players.length === 0) return { changed: false, completed: true };
+
+  const roundCount = Math.max(1, Math.min(Number(room.roundCount) || 3, 5));
+  const typedRound = Math.max(1, Math.min(Number(room.typedRound) || 1, roundCount));
+  const responses = room.typedResponses || {};
+  const pendingPlayers = players.filter((p) => sanitizeTypedResponse(responses[p.id] || "").length < 2);
+  const allSubmitted = pendingPlayers.length === 0;
+
+  if (!allSubmitted && !forceFinish) {
+    return { changed: false, completed: false, pendingPlayers };
+  }
+
+  const roundSnapshot = {};
+  players.forEach((p) => {
+    const response = sanitizeTypedResponse(responses[p.id] || "");
+    if (response.length >= 2) {
+      roundSnapshot[p.id] = response;
+    }
+  });
+
+  const history = room.typedResponsesHistory || {};
+  const historyRoundKey = String(typedRound);
+  const nextRoundHistory = {
+    ...(history[historyRoundKey] || {}),
+    ...roundSnapshot
+  };
+
+  const updates = {};
+  updates[`rooms/${state.roomCode}/typedResponsesHistory/${historyRoundKey}`] = nextRoundHistory;
+
+  if (!forceFinish && typedRound < roundCount) {
+    updates[`rooms/${state.roomCode}/typedRound`] = typedRound + 1;
+    updates[`rooms/${state.roomCode}/typedResponses`] = null;
+    updates[`rooms/${state.roomCode}/typingCompleted`] = false;
+    await update(ref(db), updates);
+    return { changed: true, completed: false, pendingPlayers: [] };
+  }
+
+  updates[`rooms/${state.roomCode}/typingCompleted`] = true;
+  await update(ref(db), updates);
+  return { changed: true, completed: true, pendingPlayers: [] };
 }
 
 async function leaveLocalRoom() {
@@ -1135,13 +1175,17 @@ async function goToVoting() {
   const settings = getRoomSettings();
   const status = state.roomData?.status;
   const currentRound = Math.max(1, Math.min(Number(state.roomData?.currentRound) || 1, settings.roundCount));
-  const typingCompleted = !!state.roomData?.typingCompleted;
+  let typingCompleted = !!state.roomData?.typingCompleted;
 
   if (status === "playing" && currentRound < settings.roundCount) {
     throw new Error(`Conclua as ${settings.roundCount} rodadas de fala antes da votação.`);
   }
   if (status === "typing" && !typingCompleted) {
-    throw new Error(`Aguardando todos enviarem as ${settings.roundCount} rodadas de resposta.`);
+    const finalizeResult = await finalizeTypingPhase({ forceFinish: true });
+    typingCompleted = !!finalizeResult.completed;
+  }
+  if (status === "typing" && !typingCompleted) {
+    throw new Error("Não foi possível concluir a etapa de digitação.");
   }
 
   const players = getPlayers();
@@ -1924,6 +1968,8 @@ function renderTyping(phaseFx = false) {
   const { roundCount } = getRoomSettings();
   const typedRound = Math.max(1, Math.min(Number(state.roomData?.typedRound) || 1, roundCount));
   const typingCompleted = !!state.roomData?.typingCompleted;
+  const completedRounds = getTypingCompletedRounds();
+  const pendingPlayers = getTypingPendingPlayers();
   const submittedCount = players.filter((p) => sanitizeTypedResponse(responses[p.id] || "").length >= 2).length;
   const myDraft = getMyTypedDraft();
   const keyboardRows = [
@@ -1938,7 +1984,17 @@ function renderTyping(phaseFx = false) {
         <div class="card typing-hero">
           <div class="section-title" style="margin-bottom:8px;">Modo Digitar Respostas</div>
           <h2 style="margin-bottom:8px;">Teclado em tempo real</h2>
-          <p>Rodada ${typedRound} de ${roundCount} · Todos veem as respostas conforme cada jogador confirma sua dica.</p>
+          <p>Rodada ${typedRound} de ${roundCount} · As respostas aparecem para todos em tempo real.</p>
+          <p style="margin-top:8px;font-size:0.82rem;color:var(--text-muted);">
+            ${typingCompleted
+              ? "Etapa concluída. O anfitrião já pode seguir para a votação."
+              : `Rodadas concluídas: ${completedRounds}/${roundCount}. A rodada atual avança automaticamente quando todos enviarem.`}
+          </p>
+          ${!typingCompleted && pendingPlayers.length > 0 ? `
+            <p style="margin-top:8px;font-size:0.82rem;color:var(--text-muted);">
+              Faltando: ${pendingPlayers.map((p) => escapeHtml(p.nickname || "Sem nome")).join(", ")}.
+            </p>
+          ` : ""}
         </div>
 
         <div class="card typing-console">
@@ -1992,7 +2048,7 @@ function renderTyping(phaseFx = false) {
         ` : ""}
 
         ${isHost()
-          ? `<button class="btn btn-danger" data-action="go-voting" ${typingCompleted ? "" : "disabled"}>Ir para Votação</button>`
+          ? `<button class="btn btn-danger" data-action="go-voting">${typingCompleted ? "Ir para Votação" : "Encerrar digitação e ir para Votação"}</button>`
           : '<div class="card card-sm text-center"><p>Aguardando todos concluírem as rodadas de digitação.</p></div>'}
         ${renderLeaveRoomButton()}
         ${state.error ? `<div class="error-msg">${escapeHtml(state.error)}</div>` : ""}
